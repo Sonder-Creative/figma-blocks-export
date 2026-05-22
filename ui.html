@@ -91,7 +91,6 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    overflow: hidden;
   }
   .card-label {
     font-size: 10px;
@@ -254,8 +253,6 @@
   /* Preview tree */
   .preview-tree {
     padding: 4px 0;
-    max-height: 160px;
-    overflow-y: auto;
   }
   .preview-empty {
     padding: 7px 14px;
@@ -317,10 +314,92 @@
     color: var(--warning);
   }
 
+  /* Text input (PAT field) */
+  .text-input-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+  }
+  .text-input {
+    flex: 1;
+    background: var(--elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-size: 12px;
+    font-family: var(--font);
+    padding: 6px 10px;
+    outline: none;
+    min-width: 0;
+  }
+  .text-input::placeholder { color: var(--text-dim); }
+  .text-input:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 2px var(--primary-dim);
+  }
+  .pat-hint {
+    font-size: 11px;
+    color: var(--text-dim);
+    padding: 0 14px 10px;
+    line-height: 1.5;
+  }
+  .pat-status {
+    display: inline-block;
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--border-light);
+    flex-shrink: 0;
+    margin-right: 4px;
+    vertical-align: middle;
+  }
+  .pat-status.connected { background: var(--success); }
+
   /* Scrollbar */
   ::-webkit-scrollbar { width: 4px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 4px; }
+
+  /* Size buttons */
+  .size-btns {
+    display: flex;
+    gap: 4px;
+    margin-left: auto;
+  }
+  .size-btn {
+    background: var(--elevated);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-muted);
+    font-size: 10px;
+    font-family: var(--font);
+    padding: 2px 6px;
+    cursor: pointer;
+    line-height: 1.4;
+    transition: background 0.1s, color 0.1s;
+  }
+  .size-btn:hover { background: var(--border); color: var(--text); }
+  .size-btn.active { background: var(--primary-dim); border-color: var(--primary); color: var(--text); }
+
+  /* Help button */
+  .help-btn {
+    background: var(--elevated);
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-family: var(--font);
+    font-weight: 700;
+    width: 22px;
+    height: 22px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: background 0.1s, color 0.1s, border-color 0.1s;
+  }
+  .help-btn:hover { background: var(--border); color: var(--text); border-color: var(--border-light); }
 </style>
 </head>
 <body>
@@ -334,10 +413,38 @@
       <div class="header-title">Sonder Blocks Export</div>
       <div class="header-sub">Figma → WordPress Blocks</div>
     </div>
+    <div class="size-btns">
+      <button class="size-btn" data-h="480">S</button>
+      <button class="size-btn active" data-h="640">M</button>
+      <button class="size-btn" data-h="860">L</button>
+    </div>
+    <button class="help-btn" id="btnHelp" title="Open setup guide">?</button>
   </div>
 
   <!-- Body -->
   <div class="body">
+
+    <!-- Figma Connection -->
+    <div class="card">
+      <div class="card-label">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+          <circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M8 5v3.5l2 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+        <span id="pat-status-dot" class="pat-status"></span>
+        Figma Connection
+      </div>
+      <div class="text-input-wrap">
+        <input type="password" class="text-input" id="patInput" placeholder="Personal access token…" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="text-input-wrap" style="margin-top:6px">
+        <input type="text" class="text-input" id="fileKeyInput" placeholder="File key (from Figma URL)…" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="pat-hint">
+        Token: Account → Settings → Security → Generate new token. Scope: <strong>File content</strong> (read).<br>
+        File key: the segment after <code>/design/</code> in your Figma URL. Only needed once per file.
+      </div>
+    </div>
 
     <!-- Image Export Settings -->
     <div class="card">
@@ -353,7 +460,7 @@
       <div class="row">
         <div>
           <div class="row-label">Export images</div>
-          <div class="row-sub">Embed as base64 in output</div>
+          <div class="row-sub" id="export-images-sub">Via Figma CDN (add token above)</div>
         </div>
         <label class="toggle">
           <input type="checkbox" id="exportImages" checked>
@@ -420,6 +527,9 @@
 </div>
 
 <script>
+  // Signal to code.js that the UI is ready to receive messages
+  parent.postMessage({ pluginMessage: { type: 'ui-ready' } }, '*');
+
   const previewTreeEl = document.getElementById('previewTree');
 
   // --- Preview rendering ---
@@ -484,16 +594,64 @@
     previewTreeEl.innerHTML = html;
   }
 
-  const exportImagesEl = document.getElementById('exportImages');
-  const maxSizeEl      = document.getElementById('maxSize');
-  const jpgQualityEl   = document.getElementById('jpgQuality');
-  const btnExport      = document.getElementById('btnExport');
-  const statusEl       = document.getElementById('status');
-  const statusTitle    = document.getElementById('status-title');
-  const statusBody     = document.getElementById('status-body');
-  const warningsEl     = document.getElementById('warnings');
+  const exportImagesEl  = document.getElementById('exportImages');
+  const maxSizeEl       = document.getElementById('maxSize');
+  const jpgQualityEl    = document.getElementById('jpgQuality');
+  const btnExport       = document.getElementById('btnExport');
+  const statusEl        = document.getElementById('status');
+  const statusTitle     = document.getElementById('status-title');
+  const statusBody      = document.getElementById('status-body');
+  const warningsEl      = document.getElementById('warnings');
+  const patInput        = document.getElementById('patInput');
+  const fileKeyInput    = document.getElementById('fileKeyInput');
+  const patStatusDot    = document.getElementById('pat-status-dot');
+  const exportImagesSub = document.getElementById('export-images-sub');
 
-  // Toggle image settings rows when export images is toggled
+  let storedPat  = '';
+  let fileKey    = '';
+
+  function updatePatUI(pat) {
+    storedPat = pat || '';
+    const connected = storedPat.length > 0;
+    patStatusDot.className = 'pat-status' + (connected ? ' connected' : '');
+    exportImagesSub.textContent = connected
+      ? 'Via Figma CDN (token connected)'
+      : 'Via Figma CDN (add token above)';
+  }
+
+  // Save PAT on blur, Enter, or after a short pause while typing
+  function savePat() {
+    const val = patInput.value.trim();
+    parent.postMessage({ pluginMessage: { type: 'save-pat', pat: val } }, '*');
+    updatePatUI(val);
+  }
+
+  let patSaveTimer = null;
+  patInput.addEventListener('input', () => {
+    clearTimeout(patSaveTimer);
+    patSaveTimer = setTimeout(savePat, 600);
+  });
+  patInput.addEventListener('blur', savePat);
+  patInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); savePat(); patInput.blur(); }
+  });
+
+  function saveFileKey() {
+    const val = fileKeyInput.value.trim();
+    fileKey = val;
+    parent.postMessage({ pluginMessage: { type: 'save-filekey', fileKey: val } }, '*');
+  }
+  let fileKeySaveTimer = null;
+  fileKeyInput.addEventListener('input', () => {
+    clearTimeout(fileKeySaveTimer);
+    fileKeySaveTimer = setTimeout(saveFileKey, 600);
+  });
+  fileKeyInput.addEventListener('blur', saveFileKey);
+  fileKeyInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); saveFileKey(); fileKeyInput.blur(); }
+  });
+
+// Toggle image settings rows when export images is toggled
   exportImagesEl.addEventListener('change', () => {
     const on = exportImagesEl.checked;
     document.getElementById('row-maxsize').style.opacity = on ? '1' : '0.4';
@@ -518,7 +676,7 @@
     warningsEl.style.display = 'flex';
   }
 
-  btnExport.addEventListener('click', () => {
+  btnExport.addEventListener('click', async () => {
     btnExport.disabled = true;
     btnExport.textContent = 'Exporting…';
     statusEl.style.display = 'none';
@@ -530,7 +688,32 @@
       jpgQuality:   parseInt(jpgQualityEl.value) || 80,
     };
 
-    parent.postMessage({ pluginMessage: { type: 'export', settings } }, '*');
+    // If PAT and fileKey are available, fetch the Figma image URL map first
+    let figmaImageMap = null;
+    if (storedPat && fileKey && settings.exportImages) {
+      try {
+        btnExport.textContent = 'Fetching image URLs…';
+        const res = await fetch(`https://api.figma.com/v1/files/${fileKey}/images`, {
+          headers: { 'X-Figma-Token': storedPat },
+        });
+        const data = await res.json();
+        console.log('[Sonder] Figma images API response:', JSON.stringify(data).slice(0, 300));
+        if (res.ok) {
+          figmaImageMap = (data.meta && data.meta.images) || data.images || null;
+          console.log('[Sonder] figmaImageMap keys:', figmaImageMap ? Object.keys(figmaImageMap).length : 'null');
+        } else {
+          console.warn('[Sonder] Figma API error:', res.status, data);
+        }
+      } catch (e) {
+        console.error('[Sonder] Figma API fetch failed:', e.message);
+        figmaImageMap = null;
+      }
+      btnExport.textContent = 'Exporting…';
+    } else {
+      console.log('[Sonder] Skipping image map fetch — pat:', !!storedPat, 'fileKey:', fileKey, 'exportImages:', settings.exportImages);
+    }
+
+    parent.postMessage({ pluginMessage: { type: 'export', settings, figmaImageMap } }, '*');
   });
 
   async function handleResizeImage(msg) {
@@ -551,8 +734,9 @@
       canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
       bitmap.close();
 
-      const outputMime = msg.ext === 'png' ? 'image/png' : 'image/jpeg';
-      const outputExt  = msg.ext === 'png' ? 'png' : 'jpg';
+      const outputFormat = msg.forceFormat || msg.ext;
+      const outputMime = outputFormat === 'png' ? 'image/png' : 'image/jpeg';
+      const outputExt  = outputFormat === 'png' ? 'png' : 'jpg';
       const dataUrl = canvas.toDataURL(outputMime, (msg.quality || 85) / 100);
       parent.postMessage({ pluginMessage: { type: 'image-resized', id: msg.id, dataUrl, ext: outputExt } }, '*');
     } catch (e) {
@@ -563,6 +747,18 @@
   window.onmessage = (event) => {
     const msg = event.data.pluginMessage;
     if (!msg) return;
+
+    // Plugin init — receive fileKey and stored PAT
+    if (msg.type === 'init') {
+      fileKey = msg.fileKey || '';
+      if (fileKey) fileKeyInput.value = fileKey;
+      const pat = msg.pat || '';
+      if (pat) {
+        patInput.value = pat;
+        updatePatUI(pat);
+      }
+      return;
+    }
 
     // Image resize request from main thread
     if (msg.type === 'resize-image') {
@@ -619,7 +815,23 @@
       }
     }
   };
+  // ---- Size preset buttons ----
+  document.querySelectorAll('.size-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.size-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const h = parseInt(btn.dataset.h);
+      parent.postMessage({ pluginMessage: { type: 'resize', width: 340, height: h } }, '*');
+    });
+  });
+
+  // ---- Help button — opens setup guide in browser ----
+  document.getElementById('btnHelp').addEventListener('click', () => {
+    parent.postMessage({ pluginMessage: { type: 'open-docs' } }, '*');
+  });
+
 </script>
+
 
 </body>
 </html>

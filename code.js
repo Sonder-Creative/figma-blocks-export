@@ -11,11 +11,19 @@
 // ================================================================
 
 /**
+ * URL to the Figma setup guide (opens in the designer's browser when they click Help).
+ * Set this to the GitHub blob URL once the repo is pushed, e.g.:
+ * 'https://github.com/yourname/yourrepo/blob/main/Sonder%20Blocks%20Export/FIGMA-SETUP-GUIDE.md'
+ */
+const DOCS_URL = 'https://github.com/Sonder-Creative/figma-blocks-export/blob/main/Sonder%20Blocks%20Export/FIGMA-SETUP-GUIDE.md';
+
+/**
  * Explicit layer name → WordPress block type.
  * Key: layer name (before // or ||), case-insensitive.
  */
 const BLOCK_IDENTIFIERS = {
   'section':    'sonder/section',
+  'footer':     'sonder/section',
   'container':  'sonder/container',
   'div':        'sonder/div',
   'columns':    'sonder/columns',
@@ -49,7 +57,7 @@ const BLOCK_IDENTIFIERS = {
 const COMPONENT_REGISTRY = [
   { match: 'Button',         block: 'sonder/button-new' },
   { match: 'Youtube player', block: 'sonder/youtube' },
-  { match: 'icon-*',         block: 'sonder/svg'  },
+  { match: 'icon-*',         block: 'sonder/icon' },
   { match: 'svg*',           block: 'sonder/svg'  },
   { match: 'Tag',            block: 'core/paragraph', extraClass: 'tag' },
 ];
@@ -117,7 +125,7 @@ const FRACTION_TOLERANCE = 0.05;
  * Format: <!-- wp:block /-->
  */
 const SELF_CLOSING_BLOCKS = new Set([
-  'sonder/button-new', 'sonder/youtube', 'sonder/vimeo',
+  'sonder/button-new', 'sonder/youtube', 'sonder/vimeo', 'sonder/icon',
 ]);
 
 /**
@@ -125,7 +133,7 @@ const SELF_CLOSING_BLOCKS = new Set([
  * Format: <!-- wp:block --> [html] <!-- /wp:block -->
  */
 const LEAF_BLOCKS = new Set([
-  'core/heading', 'core/paragraph', 'sonder/icon', 'sonder/svg',
+  'core/heading', 'core/paragraph', 'sonder/svg',
   'core/spacer', 'core/separator', 'core/image',
 ]);
 
@@ -220,6 +228,63 @@ function getOpacityClass(node) {
   const rounded = Math.round(pct / 10) * 10;
   if (rounded >= 100) return '';
   return 'opacity-' + rounded;
+}
+
+/**
+ * Returns an opacity class for an image node, checking both the layer opacity
+ * and the opacity of the image fill itself (whichever is lower).
+ */
+function getImageOpacityClass(node) {
+  // Layer-level opacity
+  const layerOpacity = ('opacity' in node && node.opacity < 1) ? node.opacity : 1;
+
+  // Fill-level opacity (Figma image fills can have their own opacity)
+  let fillOpacity = 1;
+  if ('fills' in node && node.fills && node.fills !== figma.mixed) {
+    const imgFill = node.fills.find(f => f.type === 'IMAGE' && f.visible !== false);
+    if (imgFill && typeof imgFill.opacity === 'number') {
+      fillOpacity = imgFill.opacity;
+    }
+  }
+
+  const effective = Math.min(layerOpacity, fillOpacity);
+  if (effective >= 1) return '';
+  const rounded = Math.round(effective * 100 / 10) * 10;
+  if (rounded >= 100) return '';
+  return 'opacity-' + rounded;
+}
+
+/**
+ * Returns a Tailwind text-alignment class for a TEXT node, or ''.
+ * Only meaningful on core/paragraph and core/heading blocks.
+ */
+function getTextAlignClass(node) {
+  if (node.type !== 'TEXT') return '';
+  const align = node.textAlignHorizontal;
+  if (align === 'CENTER')    return 'text-center';
+  if (align === 'RIGHT')     return 'text-right';
+  if (align === 'JUSTIFIED') return 'text-justify';
+  return '';
+}
+
+/**
+ * Maps a node's named effect style to a Tailwind shadow class.
+ * Matches against the last segment(s) of the style name, e.g.
+ * "shadow/light/500" → 'shadow-light-500'
+ * "shadow/500"       → 'shadow-500'
+ * Returns '' if no drop shadow effect style is found.
+ */
+async function getDropShadowClass(node) {
+  if (!('effectStyleId' in node) || !node.effectStyleId) return '';
+  try {
+    const style = await figma.getStyleByIdAsync(node.effectStyleId);
+    if (!style || !style.name) return '';
+    // Convert style name path to kebab class: "shadow/light/500" → "shadow-light-500"
+    const cls = style.name.toLowerCase().replace(/\//g, '-').replace(/\s+/g, '-');
+    return cls;
+  } catch (e) {
+    return '';
+  }
 }
 
 /**
@@ -344,59 +409,63 @@ function gapToTailwindClass(px) {
  * Negative values (bleed outside parent) get a '-' prefix.
  * Values outside snap tolerance use inline style instead.
  */
+/**
+ * Snaps px to the nearest Tailwind spacing value, ignoring tolerance.
+ * Always returns a result. Negative px → negative: true.
+ */
+function forceSnapToSpacing(px) {
+  const abs = Math.abs(Math.round(px));
+  const spacings = Object.keys(TAILWIND_SPACING).map(Number);
+  let closest = 0;
+  let minDiff = Infinity;
+  for (const s of spacings) {
+    const diff = Math.abs(abs - s);
+    if (diff < minDiff) { minDiff = diff; closest = s; }
+  }
+  return { cls: TAILWIND_SPACING[closest], negative: px < 0 };
+}
+
 function getAbsolutePositionClasses(node, parent) {
+  // If the node roughly matches the parent's size, it's a full-cover background.
+  // Skip position math (which can produce garbage if x/y are out of bounds in Figma)
+  // and just return absolute inset-0.
+  const widthRatio  = node.width  / parent.width;
+  const heightRatio = node.height / parent.height;
+  if (widthRatio >= 0.9 && heightRatio >= 0.9) {
+    return { classes: ['absolute', 'inset-0'], inlineStyle: '' };
+  }
+
   const top    = Math.round(node.y);
   const left   = Math.round(node.x);
   const bottom = Math.round(parent.height - (node.y + node.height));
   const right  = Math.round(parent.width  - (node.x + node.width));
 
   const sides = { top, right, bottom, left };
-  const snapped = {};
-  const inlineParts = [];
 
+  // Snap every side to nearest Tailwind value — always, no tolerance cutoff.
+  // Negative values use the '-' prefix: e.g. -top-6, -inset-4.
+  const snapped = {};
   for (const [side, px] of Object.entries(sides)) {
-    const result = snapToSpacing(px);
-    if (result !== null) snapped[side] = result;
-    else inlineParts.push(`${side}:${px}px`);
+    snapped[side] = forceSnapToSpacing(px);
   }
 
   const classes = ['absolute'];
-  const keys = Object.keys(snapped);
 
-  if (keys.length === 4) {
-    const vals = Object.values(snapped);
-    const allSame = vals.every(v => v.cls === vals[0].cls && v.negative === vals[0].negative);
-
-    if (allSame) {
-      // All four equal → inset-{n} or -inset-{n}
-      const prefix = vals[0].negative ? '-' : '';
-      classes.push(`${prefix}inset-${vals[0].cls}`);
-
-    } else if (
-      snapped.top && snapped.bottom && snapped.left && snapped.right &&
-      snapped.top.cls === snapped.bottom.cls &&
-      snapped.left.cls === snapped.right.cls
-    ) {
-      // top=bottom AND left=right → inset-y + inset-x
-      const yPfx = snapped.top.negative  ? '-' : '';
-      const xPfx = snapped.left.negative ? '-' : '';
-      classes.push(`${yPfx}inset-y-${snapped.top.cls}`);
-      classes.push(`${xPfx}inset-x-${snapped.left.cls}`);
-
-    } else {
-      // Individual sides
-      for (const [side, val] of Object.entries(snapped)) {
-        classes.push(`${val.negative ? '-' : ''}${side}-${val.cls}`);
-      }
-    }
-  } else {
-    // Partial snap — add what we can
-    for (const [side, val] of Object.entries(snapped)) {
-      classes.push(`${val.negative ? '-' : ''}${side}-${val.cls}`);
-    }
+  // All four equal → inset-{n} or -inset-{n}
+  const vals = Object.values(snapped);
+  const allSame = vals.every(v => v.cls === vals[0].cls && v.negative === vals[0].negative);
+  if (allSame) {
+    const prefix = vals[0].negative ? '-' : '';
+    classes.push(`${prefix}inset-${vals[0].cls}`);
+    return { classes, inlineStyle: '' };
   }
 
-  return { classes, inlineStyle: inlineParts.join(';') };
+  // Individual sides for everything else
+  for (const [side, val] of Object.entries(snapped)) {
+    classes.push(`${val.negative ? '-' : ''}${side}-${val.cls}`);
+  }
+
+  return { classes, inlineStyle: '' };
 }
 
 
@@ -863,23 +932,32 @@ function matchAspectRatio(width, height) {
  * Use this for nodes explicitly classified as sonder/bg-image —
  * they should always be exported regardless of fill type.
  */
-async function exportNodeAsImage(node, settings, layerIdentifier, forceExport) {
+async function exportNodeAsImage(node, settings, layerIdentifier, forceExport, forceFormat) {
   if (!settings.exportImages) return { skipped: true };
 
-  const idLower = (layerIdentifier || '').toLowerCase();
-  const forcePng = idLower.startsWith('png');
-  const forceJpg = idLower.startsWith('jpg');
   const nodeHasImageFill = hasImageFill(node);
 
   // Skip only when there's no signal at all to export
-  if (!forceExport && !nodeHasImageFill && !forcePng && !forceJpg) {
+  if (!forceExport && !nodeHasImageFill) {
     return { skipped: true, reason: 'no image fill' };
   }
 
-  // PNG when layer name starts with 'png', or fill has transparency, or no jpg forced
-  const hasTransparency = !forceJpg && node.fills && node.fills !== figma.mixed &&
-    node.fills.some(function(f) { return f.opacity !== undefined && f.opacity < 1; });
-  const isPng = forcePng || hasTransparency;
+  // Auto-detect PNG vs JPG from transparency when no format is forced.
+  // PNG: node is semi-transparent, any fill has reduced opacity, or there are no fills (transparent bg).
+  // JPG: fully opaque node with fills.
+  let isPng;
+  if (forceFormat === 'png') {
+    isPng = true;
+  } else if (forceFormat === 'jpg') {
+    isPng = false;
+  } else {
+    const nodeIsTransparent = node.opacity !== undefined && node.opacity < 1;
+    const fills = node.fills;
+    const fillsArr = (fills && fills !== figma.mixed && Array.isArray(fills)) ? fills : [];
+    const fillHasTransparency = fillsArr.some(function(f) { return f.opacity !== undefined && f.opacity < 1; });
+    const noFills = fillsArr.length === 0;
+    isPng = nodeIsTransparent || fillHasTransparency || noFills;
+  }
   const format = isPng ? 'PNG' : 'JPG';
 
   const longestEdge = Math.max(node.width || 1, node.height || 1);
@@ -924,7 +1002,7 @@ function detectImageExt(bytes) {
  * Sends raw image bytes to the UI iframe for canvas-based resizing.
  * Returns a promise that resolves with { dataUrl, ext } or { error }.
  */
-function resizeImageViaUI(bytes, ext, settings) {
+function resizeImageViaUI(bytes, ext, settings, forceFormat) {
   return new Promise(function(resolve) {
     const id = Math.random().toString(36).slice(2) + Date.now();
     pendingImageResizes[id] = resolve;
@@ -933,6 +1011,7 @@ function resizeImageViaUI(bytes, ext, settings) {
       id: id,
       buffer: bytes.buffer,
       ext: ext,
+      forceFormat: forceFormat || null,
       maxSize: settings.maxSize,
       quality: settings.jpgQuality,
     });
@@ -944,7 +1023,7 @@ function resizeImageViaUI(bytes, ext, settings) {
  * then resizes it via the UI canvas to respect maxSize/quality settings.
  * Falls back to exportNodeAsImage (rendered export) if no image fill is found.
  */
-async function getNodeSourceImageBase64(node, settings, layerIdentifier) {
+async function getNodeSourceImageBase64(node, settings, layerIdentifier, figmaImageMap, forceFormat) {
   if (!settings.exportImages) return { skipped: true };
 
   const fills = node.fills;
@@ -952,9 +1031,14 @@ async function getNodeSourceImageBase64(node, settings, layerIdentifier) {
     ? fills.find(function(f) { return f.type === 'IMAGE' && f.imageHash; })
     : null;
 
+  // If we have a Figma image URL map, use the CDN URL directly — no base64 needed.
+  if (imgFill && figmaImageMap && figmaImageMap[imgFill.imageHash]) {
+    return { url: figmaImageMap[imgFill.imageHash] };
+  }
+
   if (!imgFill) {
-    // No image fill — fall back to rendered export
-    return exportNodeAsImage(node, settings, layerIdentifier, true);
+    // No image fill — fall back to rendered export (respects forceFormat for auto-detect)
+    return exportNodeAsImage(node, settings, layerIdentifier, true, forceFormat);
   }
 
   try {
@@ -965,7 +1049,8 @@ async function getNodeSourceImageBase64(node, settings, layerIdentifier) {
     if (!bytes || bytes.length === 0) return { failed: true, reason: 'empty image bytes' };
 
     const ext = detectImageExt(bytes);
-    const resized = await resizeImageViaUI(bytes, ext, settings);
+    // forceFormat overrides the source format (e.g. force a PNG fill to export as JPG)
+    const resized = await resizeImageViaUI(bytes, ext, settings, forceFormat || null);
     if (resized.error) return { failed: true, reason: resized.error };
 
     // Extract base64 from the data URL returned by the UI
@@ -1056,14 +1141,43 @@ async function classifyNode(node, context) {
     // h1–h6 explicit names carry their level
     const lvl = idLower.match(/^h([1-6])$/);
     if (lvl) result.level = parseInt(lvl[1]);
+    // For text nodes that are headings, still fetch the style name so hero-lg etc. get applied
+    if (result.blockType === 'core/heading' && node.type === 'TEXT') {
+      const sName = await getTextStyleName(node);
+      if (sName) result.styleName = sName;
+    }
+    if (result.blockType === 'core/paragraph' && node.type === 'TEXT') {
+      const sName = await getTextStyleName(node);
+      if (sName) result.styleName = sName;
+    }
     return result;
   }
 
-  // ---- Priority 2: Image/png/jpg prefix ----
-  if (idLower.startsWith('jpg') || idLower.startsWith('png')) {
-    result.blockType = 'sonder/bg-image';
-    result.source = 'prefix-image';
-    return result;
+  // ---- Priority 1.5: Named link/button frames (non-instance only) ----
+  // Instance nodes named "button" still fall through to Priority 3 for variant/color handling.
+  if (node.type !== 'INSTANCE') {
+    if (idLower === 'link') {
+      result.blockType = 'sonder/button-new';
+      result.source = 'link-frame';
+      return result;
+    }
+    if (idLower === 'button' || idLower === 'button-sm' || idLower === 'button-lg') {
+      result.blockType = 'sonder/button-new';
+      result.source = 'button-frame';
+      return result;
+    }
+  }
+
+  // ---- Priority 2: Image override (|| png / || jpg) ----
+  // The layer name before || becomes the alt text / filename hint.
+  // e.g. "Hero sunset photo || png" → bg-image, alt="Hero sunset photo"
+  if (override) {
+    const ov = override.toLowerCase();
+    if (ov === 'png' || ov === 'jpg' || ov === 'jpeg') {
+      result.blockType = 'sonder/bg-image';
+      result.source = 'override-image';
+      return result;
+    }
   }
 
   // ---- Priority 2.5: svg prefix ----
@@ -1073,9 +1187,17 @@ async function classifyNode(node, context) {
     return result;
   }
 
+  // ---- Priority 2.6: icon- prefix → empty self-closing icon block ----
+  if (idLower.startsWith('icon-')) {
+    result.blockType = 'sonder/icon';
+    result.source = 'prefix-icon';
+    return result;
+  }
+
   // ---- Priority 3: Component instance ----
   if (node.type === 'INSTANCE') {
-    const compName = (node.mainComponent && node.mainComponent.name) ? node.mainComponent.name : '';
+    const mainComp = await node.getMainComponentAsync();
+    const compName = (mainComp && mainComp.name) ? mainComp.name : '';
 
     // Skip list
     const isSkipped = SKIP_COMPONENTS.some(s =>
@@ -1139,8 +1261,16 @@ async function classifyNode(node, context) {
   // 4c/4d: Image fill
   if (hasImageFill(node)) {
     const hasKids = 'children' in node && node.children.length > 0;
-    result.blockType = hasKids ? '__image-wrapper__' : 'sonder/bg-image';
-    result.source = hasKids ? 'image-wrapper' : 'image-fill';
+    // If the image is cropped (FILL/CROP scaleMode), any children are structural
+    // layout helpers (e.g. "Aspect ratio keeper" frames) — not real content.
+    // Treat the node as a plain image so aspect ratio classes are applied correctly.
+    if (hasKids && imageIsCropped(node)) {
+      result.blockType = 'sonder/bg-image';
+      result.source = 'image-fill-cropped';
+    } else {
+      result.blockType = hasKids ? '__image-wrapper__' : 'sonder/bg-image';
+      result.source = hasKids ? 'image-wrapper' : 'image-fill';
+    }
     return result;
   }
 
@@ -1220,9 +1350,10 @@ async function buildBlockAttrs(classification, node, autoClasses, context) {
     case 'sonder/section':
     case 'sonder/div': {
       const attrs = {};
+      if (id.toLowerCase() === 'footer') attrs.tag = 'footer';
       if (className) attrs.className = className;
       // customLabel = layer name if it's descriptive (not the block type itself)
-      const isGenericName = ['section', 'div'].includes(id.toLowerCase());
+      const isGenericName = ['section', 'div', 'footer'].includes(id.toLowerCase());
       if (!isGenericName && id) attrs.customLabel = id;
       return attrs;
     }
@@ -1281,12 +1412,68 @@ async function buildBlockAttrs(classification, node, autoClasses, context) {
       const paraClass = mergeClasses(styleName || '', autoClasses, explicitClasses);
       const attrs = {};
       if (paraClass) attrs.className = paraClass;
-      attrs._text = node.type === 'TEXT' ? node.characters : '';
+      if (node.type === 'TEXT') {
+        attrs._text = node.characters;
+      } else {
+        // Component instances (e.g. Tag) — find first TEXT descendant
+        const findText = (n) => {
+          if (n.type === 'TEXT') return n.characters;
+          if ('children' in n) {
+            for (const c of n.children) { const t = findText(c); if (t) return t; }
+          }
+          return '';
+        };
+        attrs._text = findText(node);
+      }
       return attrs;
     }
 
     // ---- Interactive blocks ----
     case 'sonder/button-new': {
+
+      // ---- Named link/button frames ----
+      if (classification.source === 'link-frame' || classification.source === 'button-frame') {
+        // Find first TEXT descendant for content
+        const findText = (n) => {
+          if (n.type === 'TEXT') return n.characters;
+          if ('children' in n) {
+            for (const c of n.children) { const t = findText(c); if (t) return t; }
+          }
+          return null;
+        };
+        const content = findText(node) || '';
+
+        // Find first descendant whose name starts with 'icon-'
+        const findIcon = (n) => {
+          if (!('children' in n)) return null;
+          for (const c of n.children) {
+            if (c.name.toLowerCase().startsWith('icon-')) return c;
+            const found = findIcon(c);
+            if (found) return found;
+          }
+          return null;
+        };
+        const iconNode = findIcon(node);
+
+        // Size class for button frames; link frames get none
+        let sizeClass = '';
+        if (classification.source === 'button-frame') {
+          sizeClass = id === 'button-lg' ? 'button-lg' : id === 'button-sm' ? 'button-sm' : 'button';
+        }
+
+        // Explicit layer classes first, then size, then base
+        const btnClass = mergeClasses(explicitClasses, sizeClass, 'icon-sm inline-flex items-center');
+        const attrs = {};
+        if (content) attrs.content = content;
+        if (iconNode) {
+          attrs.iconName = iconNode.name;
+          attrs.iconUrl  = '#' + iconNode.name;
+        }
+        if (btnClass) attrs.className = btnClass;
+        return attrs;
+      }
+
+      // ---- Component instance (existing behaviour) ----
       // Button text: prefer child TEXT node, fall back to layer identifier
       let content = id;
       if ('children' in node) {
@@ -1301,13 +1488,14 @@ async function buildBlockAttrs(classification, node, autoClasses, context) {
       }
 
       // Map Figma variant values → CSS classes
+      // Every button must have button, button-sm, or button-lg as a base size class.
       const BUTTON_VARIANT_MAP = {
         'regular':         'button',
         'small':           'button-sm',
         'large':           'button-lg',
-        'outline small':   'outlined button-sm',
-        'outline regular': 'outlined',
-        'outline large':   'outlined button-lg',
+        'outline small':   'button-sm outlined',
+        'outline regular': 'button outlined',
+        'outline large':   'button-lg outlined',
         'tag':             'tag',
         'outline tag':     'outlined tag',
       };
@@ -1321,6 +1509,9 @@ async function buildBlockAttrs(classification, node, autoClasses, context) {
           }
         }
       }
+      // Ensure a base size class is always present
+      const hasSizeClass = variantClasses.some(c => /\bbutton(-sm|-lg)?\b/.test(c));
+      if (!hasSizeClass) variantClasses.unshift('button');
 
       // Derive primary/secondary/tertiary/quaternary from fill color token
       const fillCls = await getFillColorClass(node) || '';
@@ -1341,15 +1532,24 @@ async function buildBlockAttrs(classification, node, autoClasses, context) {
     case 'sonder/bg-image': {
       const attrs = { mediaId: 0 };
       if (className) attrs.className = className;
-      // imageFilename and imageSrc are set later during image export
+      // id = the descriptive name before || (e.g. "Hero sunset photo")
+      // Used as alt text by the WP importer, and as the filename hint for export.
+      attrs._imageAlt      = id;
       attrs._imageFilename = id;
+      // || png / || jpg forces a specific export format; absent = auto-detect
+      const ov = (override || '').toLowerCase();
+      if (ov === 'png' || ov === 'jpg' || ov === 'jpeg') {
+        attrs._imageFormat = ov === 'jpeg' ? 'jpg' : ov;
+      }
       return attrs;
     }
 
     case 'sonder/icon': {
+      // Use the full layer identifier (e.g. 'icon-arrow-right') as the base class,
+      // merged with any explicit // classes and auto position classes.
+      const iconClass = mergeClasses(id, autoClasses, explicitClasses);
       const attrs = {};
-      if (className) attrs.className = className;
-      // _svgContent is set later during SVG export
+      if (iconClass) attrs.className = iconClass;
       return attrs;
     }
 
@@ -1440,29 +1640,19 @@ async function buildBlockTree(node, context) {
   }
 
   // ---- Absolute positioning ----
+  // Only bg/background named nodes get position classes — everything else is normal flow.
+  // Siblings of a bg/background absolute node get 'relative' to establish stacking context.
   const isAbsolute = 'layoutPositioning' in node && node.layoutPositioning === 'ABSOLUTE';
+  const isBgName   = /\b(bg|background)\b/.test(node.name.toLowerCase());
+  const relativeClass = (!isAbsolute && context.hasBgAbsoluteSibling) ? 'relative' : '';
+
   let positionClasses = '';
-  let inlineStyle = '';
-
-  // z-index: absolute first child → z-0 (behind), absolute last child → z-10 (in front), siblings → z-1
-  let zClass = '';
-  if (context.hasAbsoluteSibling) {
-    if (isAbsolute) {
-      zClass = context.childIndex === context.lastChildIndex ? 'z-10' : 'z-0';
-    } else {
-      zClass = 'z-1';
-    }
-  }
-
-  if (isAbsolute) {
+  if (isAbsolute && isBgName) {
     if (context.parent) {
       const pos = getAbsolutePositionClasses(node, context.parent);
-      positionClasses = mergeClasses(pos.classes.join(' '), zClass, 'be:reset');
-      inlineStyle = pos.inlineStyle;
-    }
-    // Absolute nodes with children are always wrapped in sonder/div
-    if ('children' in node && node.children.length > 0) {
-      cl.blockType = 'sonder/div';
+      positionClasses = pos.classes.join(' ');
+    } else {
+      positionClasses = 'absolute inset-0';
     }
   }
 
@@ -1479,12 +1669,19 @@ async function buildBlockTree(node, context) {
   const paddingCls  = (isButton || isSvg) ? '' : await getPaddingClasses(node);
   const marginCls   = (isButton || isSvg) ? '' : await getMarginClasses(node);
   const radiusCls   = (isButton || isSvg) ? '' : await getBorderRadiusClass(node);
-  const opacityCls  = getOpacityClass(node);
-  const autoClasses = isButton ? '' : mergeClasses(positionClasses, (!isAbsolute ? zClass : ''), flexCls, gapCls, fillCls, textColorCls, paddingCls, marginCls, radiusCls, opacityCls);
+  const opacityCls   = getOpacityClass(node);
+  const shadowCls    = (isButton || isSvg) ? '' : await getDropShadowClass(node);
+  const isTextBlock  = cl.blockType === 'core/paragraph' || cl.blockType === 'core/heading';
+  const textAlignCls = isTextBlock ? getTextAlignClass(node) : '';
+  // Component-registry paragraphs (e.g. Tag) are simple inline elements —
+  // skip layout classes entirely, only carry position + relative.
+  const isComponentParagraph = cl.blockType === 'core/paragraph' && cl.source === 'component';
+  const autoClasses = isButton ? ''
+    : isComponentParagraph ? ''
+    : mergeClasses(positionClasses, relativeClass, flexCls, gapCls, fillCls, textColorCls, paddingCls, marginCls, radiusCls, opacityCls, shadowCls, textAlignCls);
 
   // ---- Build attributes ----
   const attrs = await buildBlockAttrs(cl, node, autoClasses, context);
-  if (inlineStyle && !attrs.style) attrs.style = inlineStyle;
 
   const blockType   = cl.blockType;
   const selfClosing = SELF_CLOSING_BLOCKS.has(blockType);
@@ -1492,11 +1689,17 @@ async function buildBlockTree(node, context) {
 
   // ---- Image / SVG export ----
   if (blockType === 'sonder/bg-image') {
-    const imgId = attrs._imageFilename || node.name;
+    const imgId       = attrs._imageFilename || node.name;
+    const imageAlt    = attrs._imageAlt      || '';
+    const forceFormat = attrs._imageFormat   || null;
     delete attrs._imageFilename;
-    const imageData = await getNodeSourceImageBase64(node, context.settings, imgId);
+    delete attrs._imageAlt;
+    delete attrs._imageFormat;
+    const imageData = await getNodeSourceImageBase64(node, context.settings, imgId, context.figmaImageMap, forceFormat);
     let imageSrc = '';
-    if (imageData && imageData.base64) {
+    if (imageData && imageData.url) {
+      imageSrc = imageData.url;
+    } else if (imageData && imageData.base64) {
       imageSrc = 'data:image/' + imageData.ext + ';base64,' + imageData.base64;
     } else if (imageData && imageData.failed) {
       context.warnings.push('Image export failed for "' + node.name + '": ' + imageData.reason);
@@ -1507,6 +1710,7 @@ async function buildBlockTree(node, context) {
     const nameLower = node.name.toLowerCase();
     const isBgLayer = isAbsolute && /\b(bg|background)\b/.test(nameLower);
     if (isBgLayer) {
+      const bgOpacityCls = getImageOpacityClass(node);
       const imageBlock = {
         blockType: 'core/image',
         attrs: { id: 0 },
@@ -1514,12 +1718,12 @@ async function buildBlockTree(node, context) {
         isLeaf: true,
         children: [],
         _imageSrc: imageSrc,
-        _imageAlt: node.name,
-        _figureClass: 'object-cover',
+        _imageAlt: imageAlt,
+        _figureClass: mergeClasses('object-cover w-full h-full', bgOpacityCls),
       };
       return {
         blockType: 'sonder/div',
-        attrs: { className: mergeClasses('absolute inset-0', zClass) },
+        attrs: { className: positionClasses || 'absolute inset-0' },
         selfClosing: false,
         isLeaf: false,
         children: [imageBlock],
@@ -1529,9 +1733,11 @@ async function buildBlockTree(node, context) {
     const isCropped = imageIsCropped(node);
     const aspectCls = isCropped ? matchAspectRatio(node.width, node.height) : '';
     const radiusCls = await getBorderRadiusClass(node);
+    const imgOpacityCls = getImageOpacityClass(node);
     const figureCls = mergeClasses(
       isCropped ? mergeClasses(aspectCls, 'object-cover') : '',
-      radiusCls
+      radiusCls,
+      imgOpacityCls
     ) || undefined;
     return {
       blockType: 'core/image',
@@ -1540,7 +1746,7 @@ async function buildBlockTree(node, context) {
       isLeaf: true,
       children: [],
       _imageSrc: imageSrc,
-      _imageAlt: node.name,
+      _imageAlt: imageAlt,
       _figureClass: figureCls,
     };
   }
@@ -1569,9 +1775,11 @@ async function buildBlockTree(node, context) {
   // ---- Image-wrapper: split fill + children into separate blocks ----
   if (blockType === '__image-wrapper__') {
     const wrapId = parseLayerName(node.name).id;
-    const wrapImageData = await getNodeSourceImageBase64(node, context.settings, wrapId);
+    const wrapImageData = await getNodeSourceImageBase64(node, context.settings, wrapId, context.figmaImageMap);
     let wrapImageSrc = '';
-    if (wrapImageData && wrapImageData.base64) {
+    if (wrapImageData && wrapImageData.url) {
+      wrapImageSrc = wrapImageData.url;
+    } else if (wrapImageData && wrapImageData.base64) {
       wrapImageSrc = 'data:image/' + wrapImageData.ext + ';base64,' + wrapImageData.base64;
     } else if (wrapImageData && wrapImageData.failed) {
       context.warnings.push('Image export failed for "' + node.name + '": ' + wrapImageData.reason);
@@ -1617,12 +1825,13 @@ async function buildBlockTree(node, context) {
  */
 async function buildChildren(node, childContext) {
   if (!('children' in node)) return [];
-  const hasAbsoluteSibling = node.children.some(c => c.layoutPositioning === 'ABSOLUTE');
-  const lastIndex = node.children.length - 1;
+  const hasBgAbsoluteSibling = node.children.some(c =>
+    c.layoutPositioning === 'ABSOLUTE' && /\b(bg|background)\b/.test(c.name.toLowerCase())
+  );
   const results = [];
   for (let i = 0; i < node.children.length; i++) {
     const child = node.children[i];
-    const block = await buildBlockTree(child, Object.assign({}, childContext, { hasAbsoluteSibling, childIndex: i, lastChildIndex: lastIndex }));
+    const block = await buildBlockTree(child, Object.assign({}, childContext, { hasBgAbsoluteSibling }));
     if (block) results.push(block);
   }
   return results;
@@ -1659,13 +1868,15 @@ function getLeafHTML(block) {
     const cls = attrs.className
       ? `wp-block-heading ${attrs.className}`
       : 'wp-block-heading';
-    return `<h${lvl} class="${cls}">${attrs._text || ''}</h${lvl}>`;
+    const headingText = (attrs._text || '').replace(/\n/g, '<br>');
+    return `<h${lvl} class="${cls}">${headingText}</h${lvl}>`;
   }
 
   if (blockType === 'core/paragraph') {
     const cls = attrs.className || '';
     const clsAttr = cls ? ` class="${cls}"` : '';
-    return `<p${clsAttr}>${attrs._text || ''}</p>`;
+    const text = (attrs._text || '').replace(/\n/g, '<br>');
+    return `<p${clsAttr}>${text}</p>`;
   }
 
   if (blockType === 'sonder/svg') {
@@ -1685,7 +1896,8 @@ function getLeafHTML(block) {
   if (blockType === 'sonder/bg-image') {
     const src = block._imageSrc || '';
     const alt = block._imageAlt || '';
-    return `<img src="${src}" alt="${alt}"/>`;
+    const cls = attrs.className ? ` class="${attrs.className}"` : '';
+    return `<img src="${src}" alt="${alt}"${cls}/>`;
   }
 
   if (blockType === 'core/image') {
@@ -1770,7 +1982,7 @@ function serializeTree(blocks) {
  * No async operations — used for the live preview panel.
  * Returns { blockType, hasIssue }
  */
-function quickClassify(node, parentBlockType) {
+async function quickClassify(node, parentBlockType) {
   var parsed = parseLayerName(node.name);
   var id = parsed.id;
   var idLower = id.toLowerCase();
@@ -1792,7 +2004,8 @@ function quickClassify(node, parentBlockType) {
 
   // Priority 3: Component instance
   if (node.type === 'INSTANCE') {
-    var compName = (node.mainComponent && node.mainComponent.name) ? node.mainComponent.name : '';
+    var mainComp = await node.getMainComponentAsync();
+    var compName = (mainComp && mainComp.name) ? mainComp.name : '';
     var isSkipped = SKIP_COMPONENTS.some(function(s) {
       return s.toLowerCase() === compName.toLowerCase() || s.toLowerCase() === node.name.toLowerCase();
     });
@@ -1850,10 +2063,10 @@ function quickClassify(node, parentBlockType) {
  * Recursively builds a lightweight preview node.
  * Stops at depth 5 to keep the tree readable.
  */
-function buildPreviewNode(node, depth, parentBlockType) {
+async function buildPreviewNode(node, depth, parentBlockType) {
   if (depth > 5) return null;
 
-  var cl = quickClassify(node, parentBlockType);
+  var cl = await quickClassify(node, parentBlockType);
   if (cl.blockType === '__skip__') return null;
 
   var label = parseLayerName(node.name).id || node.name;
@@ -1871,7 +2084,7 @@ function buildPreviewNode(node, depth, parentBlockType) {
 
   if (!isSelfClosing && !isLeaf && 'children' in node && node.children.length > 0) {
     for (var i = 0; i < node.children.length; i++) {
-      var child = buildPreviewNode(node.children[i], depth + 1, cl.blockType);
+      var child = await buildPreviewNode(node.children[i], depth + 1, cl.blockType);
       if (child) previewNode.children.push(child);
     }
   }
@@ -1880,7 +2093,7 @@ function buildPreviewNode(node, depth, parentBlockType) {
 }
 
 /** Scans the current selection and posts a 'preview' message to the UI. */
-function runPreview() {
+async function runPreview() {
   var selection = figma.currentPage.selection;
   if (!selection || selection.length === 0) {
     figma.ui.postMessage({ type: 'preview', nodes: [] });
@@ -1889,7 +2102,7 @@ function runPreview() {
 
   var nodes = [];
   for (var i = 0; i < selection.length; i++) {
-    var node = buildPreviewNode(selection[i], 0, null);
+    var node = await buildPreviewNode(selection[i], 0, null);
     if (node) nodes.push(node);
   }
 
@@ -1908,7 +2121,7 @@ function runPreview() {
  * @param {object} settings - { exportImages, maxSize, jpgQuality }
  * @returns {object} - { success, markup, warnings, stripped, error }
  */
-async function runExport(settings) {
+async function runExport(settings, figmaImageMap) {
   const selection = figma.currentPage.selection;
 
   if (!selection || selection.length === 0) {
@@ -1918,6 +2131,7 @@ async function runExport(settings) {
   const warnings = [];
   const context = {
     settings,
+    figmaImageMap: figmaImageMap || null,
     headingMap: new Map(),
     parent: null,
     parentBlockType: null,
@@ -1961,9 +2175,11 @@ async function runExport(settings) {
 
 figma.showUI(__html__, {
   width: 340,
-  height: 560,
+  height: 640,
   title: 'Sonder Blocks Export',
 });
+
+// Init data is sent in response to the 'ui-ready' message from the UI.
 
 // Run preview immediately on open, then whenever selection changes.
 runPreview();
@@ -1979,10 +2195,38 @@ figma.ui.onmessage = async (msg) => {
     return;
   }
 
+  if (msg.type === 'ui-ready') {
+    const pat     = await figma.clientStorage.getAsync('figma-pat')     || '';
+    const savedKey = await figma.clientStorage.getAsync('figma-filekey') || '';
+    const fileKey = figma.fileKey || savedKey || '';
+    figma.ui.postMessage({ type: 'init', fileKey, pat });
+    return;
+  }
+
+  if (msg.type === 'resize') {
+    figma.ui.resize(msg.width, msg.height);
+    return;
+  }
+
+  if (msg.type === 'open-docs') {
+    figma.openExternal(DOCS_URL);
+    return;
+  }
+
+  if (msg.type === 'save-pat') {
+    await figma.clientStorage.setAsync('figma-pat', msg.pat || '');
+    return;
+  }
+
+  if (msg.type === 'save-filekey') {
+    await figma.clientStorage.setAsync('figma-filekey', msg.fileKey || '');
+    return;
+  }
+
   if (msg.type === 'export') {
     figma.ui.postMessage({ type: 'status', message: 'Processing selection…' });
 
-    const result = await runExport(msg.settings);
+    const result = await runExport(msg.settings, msg.figmaImageMap || null);
 
     if (!result.success) {
       figma.ui.postMessage({ type: 'error', message: result.error });
