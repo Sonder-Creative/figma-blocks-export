@@ -10,12 +10,6 @@
 // Edit these values as your design system evolves.
 // ================================================================
 
-/**
- * URL to the Figma setup guide (opens in the designer's browser when they click Help).
- * Set this to the GitHub blob URL once the repo is pushed, e.g.:
- * 'https://github.com/yourname/yourrepo/blob/main/Sonder%20Blocks%20Export/FIGMA-SETUP-GUIDE.md'
- */
-const DOCS_URL = 'https://github.com/Sonder-Creative/figma-blocks-export/blob/main/Sonder%20Blocks%20Export/FIGMA-SETUP-GUIDE.md';
 
 /**
  * Explicit layer name → WordPress block type.
@@ -1202,7 +1196,7 @@ async function classifyNode(node, context) {
     // Skip list
     const isSkipped = SKIP_COMPONENTS.some(s =>
       s.toLowerCase() === compName.toLowerCase() ||
-      s.toLowerCase() === node.name.toLowerCase()
+      s.toLowerCase() === idLower
     );
     if (isSkipped) {
       result.blockType = '__skip__';
@@ -1210,9 +1204,9 @@ async function classifyNode(node, context) {
       return result;
     }
 
-    // Registry match — check both component name and layer name
+    // Registry match — check component name and parsed layer id (id strips // classes and || overrides)
     for (const entry of COMPONENT_REGISTRY) {
-      if (matchesPattern(entry.match, compName) || matchesPattern(entry.match, node.name)) {
+      if (matchesPattern(entry.match, compName) || matchesPattern(entry.match, id)) {
         // Special: Tag + layer identifier includes 'button' → button block
         if (entry.block === 'core/paragraph' && idLower.includes('button')) {
           result.blockType = 'sonder/button-new';
@@ -1409,7 +1403,7 @@ async function buildBlockAttrs(classification, node, autoClasses, context) {
     }
 
     case 'core/paragraph': {
-      const paraClass = mergeClasses(styleName || '', autoClasses, explicitClasses);
+      const paraClass = mergeClasses(styleName || '', extraClass, autoClasses, explicitClasses);
       const attrs = {};
       if (paraClass) attrs.className = paraClass;
       if (node.type === 'TEXT') {
@@ -2208,10 +2202,6 @@ figma.ui.onmessage = async (msg) => {
     return;
   }
 
-  if (msg.type === 'open-docs') {
-    figma.openExternal(DOCS_URL);
-    return;
-  }
 
   if (msg.type === 'save-pat') {
     await figma.clientStorage.setAsync('figma-pat', msg.pat || '');

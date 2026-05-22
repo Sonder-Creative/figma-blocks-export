@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>Sonder Blocks Export</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -105,6 +106,10 @@
     gap: 6px;
   }
   .card-label svg { opacity: 0.6; }
+  .card-label.collapsible { cursor: pointer; user-select: none; }
+  .card-label.collapsible:hover { color: var(--text); }
+  .card-label .chevron { margin-left: auto; opacity: 0.5; transition: transform 0.2s; flex-shrink: 0; }
+  .card-label.open .chevron { transform: rotate(180deg); }
 
   /* Row inside card */
   .row {
@@ -400,6 +405,75 @@
     transition: background 0.1s, color 0.1s, border-color 0.1s;
   }
   .help-btn:hover { background: var(--border); color: var(--text); border-color: var(--border-light); }
+
+  /* Docs overlay */
+  .docs-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: var(--bg);
+    flex-direction: column;
+    z-index: 100;
+  }
+  .docs-overlay.visible { display: flex; }
+  .docs-header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+  .docs-header-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    flex: 1;
+  }
+  .docs-close {
+    background: var(--elevated);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-family: var(--font);
+    padding: 3px 10px;
+    cursor: pointer;
+    transition: background 0.1s, color 0.1s;
+  }
+  .docs-close:hover { background: var(--border); color: var(--text); }
+  .docs-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px 28px;
+  }
+  .docs-loading {
+    color: var(--text-muted);
+    font-size: 12px;
+    padding: 20px 0;
+  }
+
+  /* Rendered markdown styles */
+  .docs-content { color: var(--text); font-size: 13px; line-height: 1.7; max-width: 680px; }
+  .docs-content h1 { font-size: 20px; font-weight: 700; margin: 0 0 20px; color: var(--text); }
+  .docs-content h2 { font-size: 16px; font-weight: 700; margin: 32px 0 12px; color: var(--text); padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+  .docs-content h3 { font-size: 13px; font-weight: 700; margin: 24px 0 8px; color: var(--text); }
+  .docs-content h4 { font-size: 12px; font-weight: 700; margin: 16px 0 6px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  .docs-content p { margin: 0 0 12px; }
+  .docs-content ul, .docs-content ol { margin: 0 0 12px; padding-left: 20px; }
+  .docs-content li { margin-bottom: 4px; }
+  .docs-content code { background: var(--elevated); border: 1px solid var(--border); border-radius: 3px; padding: 1px 5px; font-size: 11px; font-family: 'SF Mono', 'Fira Code', monospace; color: #7dd3fc; }
+  .docs-content pre { background: var(--elevated); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; margin: 0 0 12px; overflow-x: auto; }
+  .docs-content pre code { background: none; border: none; padding: 0; color: #93c5fd; font-size: 11px; }
+  .docs-content table { width: 100%; border-collapse: collapse; margin: 0 0 16px; font-size: 12px; }
+  .docs-content th { background: var(--elevated); border: 1px solid var(--border); padding: 7px 10px; text-align: left; font-weight: 600; color: var(--text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .docs-content td { border: 1px solid var(--border); padding: 7px 10px; vertical-align: top; }
+  .docs-content tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+  .docs-content blockquote { border-left: 3px solid var(--primary); padding: 8px 14px; margin: 0 0 12px; background: var(--primary-dim); border-radius: 0 4px 4px 0; color: var(--text-muted); font-size: 12px; }
+  .docs-content hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
+  .docs-content a { color: #60a5fa; }
+  .docs-content strong { color: var(--text); font-weight: 600; }
 </style>
 </head>
 <body>
@@ -426,62 +500,65 @@
 
     <!-- Figma Connection -->
     <div class="card">
-      <div class="card-label">
+      <div class="card-label collapsible" data-target="figma-body">
         <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
           <circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.5"/>
           <path d="M8 5v3.5l2 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
         </svg>
         <span id="pat-status-dot" class="pat-status"></span>
         Figma Connection
+        <svg class="chevron" width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2.5 3.5L5 6l2.5-2.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </div>
-      <div class="text-input-wrap">
-        <input type="password" class="text-input" id="patInput" placeholder="Personal access token…" autocomplete="off" spellcheck="false">
-      </div>
-      <div class="text-input-wrap" style="margin-top:6px">
-        <input type="text" class="text-input" id="fileKeyInput" placeholder="File key (from Figma URL)…" autocomplete="off" spellcheck="false">
-      </div>
-      <div class="pat-hint">
-        Token: Account → Settings → Security → Generate new token. Scope: <strong>File content</strong> (read).<br>
-        File key: the segment after <code>/design/</code> in your Figma URL. Only needed once per file.
+      <div class="card-body" id="figma-body" style="display:none">
+        <div class="text-input-wrap">
+          <input type="password" class="text-input" id="patInput" placeholder="Personal access token…" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="text-input-wrap" style="margin-top:6px">
+          <input type="text" class="text-input" id="fileKeyInput" placeholder="File key (from Figma URL)…" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="pat-hint">
+          Token: Account → Settings → Security → Generate new token. Scope: <strong>File content</strong> (read).<br>
+          File key: the segment after <code>/design/</code> in your Figma URL. Only needed once per file.
+        </div>
       </div>
     </div>
 
     <!-- Image Export Settings -->
     <div class="card">
-      <div class="card-label">
+      <div class="card-label collapsible" data-target="image-body">
         <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
           <rect x="1" y="3" width="14" height="10" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
           <circle cx="5.5" cy="7" r="1.5" stroke="currentColor" stroke-width="1.2"/>
           <path d="M1 11l3.5-3 3 2.5 2.5-3 4 3.5" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
         </svg>
         Image Export
+        <svg class="chevron" width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2.5 3.5L5 6l2.5-2.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </div>
-
-      <div class="row">
-        <div>
-          <div class="row-label">Export images</div>
-          <div class="row-sub" id="export-images-sub">Via Figma CDN (add token above)</div>
+      <div class="card-body" id="image-body" style="display:none">
+        <div class="row">
+          <div>
+            <div class="row-label">Export images</div>
+            <div class="row-sub" id="export-images-sub">Via Figma CDN (add token above)</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="exportImages" checked>
+            <div class="toggle-track"></div>
+            <div class="toggle-thumb"></div>
+          </label>
         </div>
-        <label class="toggle">
-          <input type="checkbox" id="exportImages" checked>
-          <div class="toggle-track"></div>
-          <div class="toggle-thumb"></div>
-        </label>
-      </div>
-
-      <div class="row" id="row-maxsize">
-        <div class="row-label">Max size</div>
-        <div class="input-wrap">
-          <input type="number" id="maxSize" value="1920" min="100" max="8000" step="10">
-          <span class="input-unit">px</span>
+        <div class="row" id="row-maxsize">
+          <div class="row-label">Max size</div>
+          <div class="input-wrap">
+            <input type="number" id="maxSize" value="1920" min="100" max="8000" step="10">
+            <span class="input-unit">px</span>
+          </div>
         </div>
-      </div>
-
-      <div class="row" id="row-quality">
-        <div class="row-label">JPG quality</div>
-        <div class="input-wrap">
-          <input type="number" id="jpgQuality" value="80" min="10" max="100" step="5">
-          <span class="input-unit">%</span>
+        <div class="row" id="row-quality">
+          <div class="row-label">JPG quality</div>
+          <div class="input-wrap">
+            <input type="number" id="jpgQuality" value="80" min="10" max="100" step="5">
+            <span class="input-unit">%</span>
+          </div>
         </div>
       </div>
     </div>
@@ -524,6 +601,18 @@
     <div class="warnings" id="warnings" style="display:none;margin-top:8px;"></div>
   </div>
 
+</div>
+
+<!-- Docs overlay — must be in DOM before the script runs -->
+<div class="docs-overlay" id="docsOverlay">
+  <div class="docs-header">
+    <div class="docs-header-title">Figma Setup Guide</div>
+    <button class="docs-close" id="docsClose">✕ Close</button>
+  </div>
+  <div class="docs-body">
+    <div class="docs-loading" id="docsLoading">Loading guide…</div>
+    <div class="docs-content" id="docsContent"></div>
+  </div>
 </div>
 
 <script>
@@ -815,6 +904,16 @@
       }
     }
   };
+  // ---- Collapsible cards ----
+  document.querySelectorAll('.card-label.collapsible').forEach(label => {
+    label.addEventListener('click', () => {
+      const body = document.getElementById(label.dataset.target);
+      const isOpen = body.style.display !== 'none';
+      body.style.display = isOpen ? 'none' : 'block';
+      label.classList.toggle('open', !isOpen);
+    });
+  });
+
   // ---- Size preset buttons ----
   document.querySelectorAll('.size-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -825,13 +924,39 @@
     });
   });
 
-  // ---- Help button — opens setup guide in browser ----
-  document.getElementById('btnHelp').addEventListener('click', () => {
-    parent.postMessage({ pluginMessage: { type: 'open-docs' } }, '*');
+  // ---- Help button — loads and renders the setup guide ----
+  let docsLoaded = false;
+  let prevSize = { width: 340, height: 640 };
+
+  document.getElementById('btnHelp').addEventListener('click', async () => {
+    // Track current size so we can restore it on close
+    const activeBtn = document.querySelector('.size-btn.active');
+    prevSize = { width: 340, height: activeBtn ? parseInt(activeBtn.dataset.h) : 640 };
+
+    // Resize to a wider docs view
+    parent.postMessage({ pluginMessage: { type: 'resize', width: 760, height: 720 } }, '*');
+    document.getElementById('docsOverlay').classList.add('visible');
+
+    if (docsLoaded) return;
+
+    try {
+      const res = await fetch('https://raw.githubusercontent.com/Sonder-Creative/figma-blocks-export/main/FIGMA-SETUP-GUIDE.md');
+      if (!res.ok) throw new Error('Could not load guide (' + res.status + ')');
+      const md = await res.text();
+      document.getElementById('docsContent').innerHTML = marked.parse(md);
+      document.getElementById('docsLoading').style.display = 'none';
+      docsLoaded = true;
+    } catch (e) {
+      document.getElementById('docsLoading').textContent = 'Failed to load guide: ' + e.message;
+    }
+  });
+
+  document.getElementById('docsClose').addEventListener('click', () => {
+    document.getElementById('docsOverlay').classList.remove('visible');
+    parent.postMessage({ pluginMessage: { type: 'resize', width: prevSize.width, height: prevSize.height } }, '*');
   });
 
 </script>
-
 
 </body>
 </html>

@@ -252,7 +252,7 @@ These library components are recognised automatically — no special naming need
 |----------------|-------------|
 | `Button` | Mapped to a button block (see above) |
 | `Youtube player` | Mapped to a YouTube embed block |
-| `Tag` | Mapped to a paragraph with the class `tag` |
+| `Tag` | Mapped to a paragraph with the class `tag` — added automatically, no need to add `// tag` to the layer name. Extra classes can still be added via `//` as usual. |
 | `icon-*` (component) | Mapped to an icon block |
 | `svg*` (component) | Mapped to an SVG block |
 
